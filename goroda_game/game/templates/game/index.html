@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Игра Города</title>
+    <style>
+        body { font-family: sans-serif; background-color: #f0f2f5; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #ddd; padding-bottom: 10px; margin-bottom: 20px; }
+        .game-board { height: 300px; overflow-y: auto; border: 1px solid #ccc; padding: 10px; margin-bottom: 20px; background: #fafafa; }
+        .move-item { padding: 5px; border-bottom: 1px solid #eee; }
+        .move-item.player { color: #0056b3; font-weight: bold; }
+        .move-item.opponent { color: #28a745; font-weight: bold; }
+        .input-area { display: flex; gap: 10px; }
+        input[type="text"] { flex-grow: 1; padding: 10px; border: 1px solid #ccc; border-radius: 4px; }
+        button { padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; color: white; font-weight: bold; }
+        .btn-send { background-color: #007bff; }
+        .btn-send:disabled { background-color: #6c757d; cursor: not-allowed; }
+        .btn-surrender { background-color: #dc3545; }
+        .status { margin-bottom: 15px; font-weight: bold; }
+        .error { color: red; margin-top: 10px; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <h1>Игра "Города"</h1>
+        <div id="user-info">Игрок: <b>{{ request.user.username }}</b></div>
+    </div>
+
+    <div id="status" class="status">Загрузка...</div>
+
+    <div id="game-board" class="game-board">
+        <!-- Здесь будут появляться города -->
+    </div>
+
+    <div class="input-area">
+        <input type="text" id="city-input" placeholder="Введите название города..." autocomplete="off">
+        <button id="send-btn" class="btn-send" onclick="sendMove()">Отправить</button>
+        <button id="surrender-btn" class="btn-surrender" onclick="surrender()">Сдаться</button>
+    </div>
+    
+    <div id="error-message" class="error"></div>
+</div>
+
+<script>
+    // ВАЖНО: Здесь мы жестко задаем ID игры.
+    const GAME_ID = 1; 
+    let currentTurnUsername = null;
+    const currentUser = "{{ request.user.username }}";
+    let lastMovesCount = 0; // Для отслеживания новых ходов
+
+    // Функция для получения CSRF-токена (нужно для POST-запросов в Django)
+    function getCookie(name) {
+        let cookieValue = null;
+        if (document.cookie && document.cookie !== '') {
+            const cookies = document.cookie.split(';');
+            for (let i = 0; i < cookies.length; i++) {
+                const cookie = cookies[i].trim();
+                if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                    cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                    break;
+                }
+            }
+        }
+        return cookieValue;
+    }
+
+    // 1. Функция обновления состояния игры (запрашивает данные с бэкенда)
+    async function updateGameState() {
+        try {
+            const response = await fetch(`/api/game/${GAME_ID}/state/`);
+            if (!response.ok) throw new Error("Ошибка загрузки игры");
+            const data = await response.json();
+            renderGame(data);
+        } catch (error) {
+            document.getElementById('error-message').innerText = error.message;
+        }
+    }
+
+    // 2. Отрисовка интерфейса на основе данных
+    function renderGame(data) {
+        const board = document.getElementById('game-board');
+        const statusDiv = document.getElementById('status');
+        const input = document.getElementById('city-input');
+        const sendBtn = document.getElementById('send-btn');
+
+        // Очищаем поле только если количество ходов изменилось (чтобы не дергать интерфейс зря)
+        if (data.moves.length !== lastMovesCount) {
+            board.innerHTML = '';
+            
+            data.moves.forEach(move => {
+                const div = document.createElement('div');
+                div.className = `move-item ${move.player.username === currentUser ? 'player' : 'opponent'}`;
+                div.innerText = `${move.player.username}: ${move.city}`;
+                board.appendChild(div);
+            });
+            
+            // Прокрутка вниз
+            board.scrollTop = board.scrollHeight;
+            lastMovesCount = data.moves.length;
+        }
+
+        // Обновление статуса
+        if (data.status === 'waiting') {
+            statusDiv.innerText = "Ожидание второго игрока...";
+            input.disabled = true;
+            sendBtn.disabled = true;
+            input.value = '';
+        } else if (data.status === 'finished') {
+            statusDiv.innerText = `Игра завершена. Победитель: ${data.winner.username}`;
+            input.disabled = true;
+            sendBtn.disabled = true;
+            input.value = '';
+        } else {
+            // Игра идет
+            currentTurnUsername = data.current_turn.username;
+            if (currentTurnUsername === currentUser) {
+                statusDiv.innerText = "Ваш ход!";
+                input.disabled = false;
+                sendBtn.disabled = false;
+                // Фокусируемся на инпуте только если он был неактивен
+                if (document.activeElement !== input) {
+                    input.focus();
+                }
+            } else {
+                statusDiv.innerText = `Ход игрока: ${currentTurnUsername}...`;
+                input.disabled = true;
+                sendBtn.disabled = true;
+                input.value = ''; // Очищаем поле, если ход не наш
+            }
+        }
+    }
+
+    // 3. Отправка хода
+    async function sendMove() {
+        const cityInput = document.getElementById('city-input');
+        const city = cityInput.value.trim();
+        if (!city) return;
+
+        // Блокируем кнопку на время запроса
+        document.getElementById('send-btn').disabled = true;
+        document.getElementById('error-message').innerText = '';
+
+        try {
+            const response = await fetch(`/api/game/${GAME_ID}/move/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCookie('csrftoken')
+                },
+                body: JSON.stringify({ city: city })
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                document.getElementById('error-message').innerText = data.error || "Ошибка";
+                // Возвращаем кнопку, чтобы можно было исправить
+                document.getElementById('send-btn').disabled = false;
+                return;
+            }
+
+            // Если успех — очищаем поле и обновляем состояние
+            cityInput.value = '';
+            updateGameState(); 
+
+        } catch (error) {
+            document.getElementById('error-message').innerText = "Ошибка сети";
+            document.getElementById('send-btn').disabled = false;
+        }
+    }
+
+    // 4. Кнопка "Сдаться"
+    async function surrender() {
+        if (!confirm("Вы уверены, что хотите сдаться?")) return;
+        
+        try {
+            const response = await fetch(`/api/game/${GAME_ID}/surrender/`, {
+                method: 'POST',
+                headers: {
+                    'X-CSRFToken': getCookie('csrftoken')
+                }
+            });
+            if (response.ok) {
+                updateGameState();
+            }
+        } catch (error) {
+            console.error(error);
+        }
+    }
+
+    // При загрузке страницы сразу запрашиваем состояние
+    document.addEventListener('DOMContentLoaded', () => {
+        updateGameState();
+        
+        // Включаем отправку по нажатию Enter
+        document.getElementById('city-input').addEventListener('keypress', function (e) {
+            if (e.key === 'Enter') {
+                sendMove();
+            }
+        });
+
+        // АВТООБНОВЛЕНИЕ: каждые 2 секунды запрашиваем новые данные с сервера
+        setInterval(updateGameState, 2000);
+    });
+</script>
+
+</body>
+</html>
